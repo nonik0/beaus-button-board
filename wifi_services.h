@@ -25,6 +25,8 @@ private:
   int _disconnectCount = 0;
   unsigned long _lastStatusCheckMs = 0;
   bool _displayState = true;
+  volatile bool _connecting = false;
+  bool _taskStarted = false;
   ArduinoOTAClass _ota;
   WebServer _restServer;
   vector<SetDisplayCallback> _setDisplayCallbacks;
@@ -32,6 +34,7 @@ private:
 public:
   void setup(const char *hostname);
   void createTask();
+  bool isConnecting() { return !isConnected() && _connecting; };
   bool isConnected() { return WiFi.status() == WL_CONNECTED; }
   void registerSetDisplayCallback(SetDisplayCallback callback);
   void registerSetMessageCallback(const char *endpoint, SetMessageCallback callback);
@@ -52,6 +55,26 @@ private:
 
 void WifiServices::setup(const char *hostname)
 {
+  if (isConnected())
+  {
+    log_w("Already connected");
+    return;
+  }
+  else if (isConnecting())
+  {
+    log_w("Already trying to connect");
+    return;
+  }
+
+  _connecting = true;
+
+  if (_taskStarted)
+  {
+    // setting _connecting to true will trigger task to try again
+    log_w("Previous attempt failed, trying again");
+    return;
+  }
+
   log_i("Setting up Wifi services for %s", hostname);
 
   _hostname = hostname;
@@ -63,22 +86,18 @@ void WifiServices::setup(const char *hostname)
     p++;
   }
 
-  if (!wifiSetup())
-  {
-    return;
-  }
-
-  mDnsSetup();
-  otaSetup();
-  restSetup();
-
-  log_i("WiFi services setup complete");
+  createTask();
 }
 
 void WifiServices::createTask()
 {
-  log_i("Starting WifiServicesTask");
+  if (_taskStarted)
+  {
+    log_e("WifiServicesTask already running");
+    return;
+  }
 
+  log_i("Starting WifiServicesTask");
   xTaskCreate(
       [](void *p)
       { ((WifiServices *)p)->task(); },
@@ -87,6 +106,8 @@ void WifiServices::createTask()
       this,
       TaskPriority,
       NULL);
+
+  _taskStarted = true;
 }
 
 void WifiServices::registerSetDisplayCallback(SetDisplayCallback callback)
@@ -104,11 +125,35 @@ void WifiServices::task()
 {
   while (1)
   {
-    checkWifiStatus();
-    _ota.handle();
-    _restServer.handleClient();
+    if (!_connecting)
+    {
+      delay(10);
+      continue;
+    }
 
-    delay(10);
+    if (!wifiSetup())
+    {
+      log_w("Wifi setup failed");
+      _connecting = false;
+      continue;
+    }
+
+    _connecting = false;
+
+    mDnsSetup();
+    otaSetup();
+    restSetup();
+
+    log_i("WiFi services setup complete");
+
+    while (1)
+    {
+      checkWifiStatus();
+      _ota.handle();
+      _restServer.handleClient();
+
+      delay(10);
+    }
   }
 }
 

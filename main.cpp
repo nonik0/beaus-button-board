@@ -4,6 +4,8 @@
 #include "wifi_services.h"
 
 #define SPEAKER_PIN 2
+#define INT_PIN 3
+// SDA 4, SCL 5
 #define NUM_KEYS 16
 #define NUM_ROWS 4
 #define NUM_COLS 4
@@ -11,15 +13,26 @@
 #define NUM_PUZZLE_COLORS 4
 #define OFF 0
 
+// these are mapped to LED indices
+enum ModeSelect
+{
+  Wifi = 0,
+  BrightnessUp = 1,
+  BrightnessDn = 2,
+  Puzzle = 14,
+  Draw = 15,
+};
+
 enum GameMode
 {
-  Draw = 15,
-  Puzzle = 14,
-  None = 0,
+  DrawMode,
+  PuzzleMode,
+  None,
 };
 
 Adafruit_NeoTrellis neoTrellis = Adafruit_NeoTrellis();
 int buttonStates[NUM_KEYS];
+uint8_t brightness = 20;
 GameMode gameMode = GameMode::None;
 uint32_t *gameModeColors;
 uint32_t gameModeNumColors;
@@ -29,9 +42,9 @@ uint32_t Off = neoTrellis.pixels.Color(0, 0, 0);
 uint32_t Red = neoTrellis.pixels.Color(0xFF, 0, 0);
 uint32_t Orange = neoTrellis.pixels.Color(0xFF, 0x7F, 0);
 uint32_t Yellow = neoTrellis.pixels.Color(0xFF, 0xFF, 0);
-//uint32_t YellowGreen = neoTrellis.pixels.Color(0x7F, 0xFF, 0);
+// uint32_t YellowGreen = neoTrellis.pixels.Color(0x7F, 0xFF, 0);
 uint32_t Green = neoTrellis.pixels.Color(0, 0xFF, 0);
-//uint32_t GreenBlue = neoTrellis.pixels.Color(0, 0xFF, 0x7F);
+// uint32_t GreenBlue = neoTrellis.pixels.Color(0, 0xFF, 0x7F);
 uint32_t Blue = neoTrellis.pixels.Color(0, 0, 0xFF);
 uint32_t Indigo = neoTrellis.pixels.Color(0x7F, 0, 0xFF);
 uint32_t Violet = neoTrellis.pixels.Color(0xFF, 0, 0xFF);
@@ -64,21 +77,68 @@ void increment_key(int row, int col, int inc)
   }
 }
 
-TrellisCallback gameButtonCallback(keyEvent evt)
+TrellisCallback modeSelectButtonCallback(keyEvent event)
 {
-  if (evt.bit.EDGE == SEESAW_KEYPAD_EDGE_RISING)
+  if (event.bit.EDGE == SEESAW_KEYPAD_EDGE_RISING)
   {
-    int key = evt.bit.NUM;
+    int delta = 0;
+
+    switch (event.bit.NUM)
+    {
+    case ModeSelect::Draw:
+      gameMode = GameMode::DrawMode;
+      gameModeColors = DrawColors;
+      gameModeNumColors = NUM_DRAW_COLORS;
+      log_i("Game Mode: draw");
+      break;
+    case ModeSelect::Puzzle:
+      gameMode = GameMode::PuzzleMode;
+      gameModeColors = PuzzleColors;
+      gameModeNumColors = NUM_PUZZLE_COLORS;
+      log_i("Game Mode: puzzle");
+      break;
+    case ModeSelect::BrightnessUp:
+    case ModeSelect::BrightnessDn:
+      delta = event.bit.NUM == ModeSelect::BrightnessUp ? 17 : -17;
+      brightness = constrain(brightness + delta, 5, 100);
+      neoTrellis.pixels.setBrightness(brightness);
+
+      // TODO: factor into helper shared with setup
+      neoTrellis.pixels.setPixelColor(ModeSelect::Draw, Red);
+      neoTrellis.pixels.setPixelColor(ModeSelect::Puzzle, Green);
+      neoTrellis.pixels.setPixelColor(ModeSelect::BrightnessUp, Yellow);
+      neoTrellis.pixels.setPixelColor(ModeSelect::BrightnessDn, Orange);
+      if (neoTrellis.pixels.getPixelColor(ModeSelect::Wifi) != Off)
+      {
+        neoTrellis.pixels.setPixelColor(ModeSelect::Wifi, Blue);
+      }
+      neoTrellis.pixels.show();
+      log_i("Brightness: %d", brightness);
+      break;
+    case ModeSelect::Wifi:
+      wifiServices.setup(DEVICE_NAME);
+      break;
+    }
+  }
+
+  return NULL;
+}
+
+TrellisCallback gameButtonCallback(keyEvent event)
+{
+  if (event.bit.EDGE == SEESAW_KEYPAD_EDGE_RISING)
+  {
+    int key = event.bit.NUM;
     int row = indexToRow(key);
     int col = indexToCol(key);
     log_i("%d,%d pressed", row, col);
 
     switch (gameMode)
     {
-    case GameMode::Draw:
+    case GameMode::DrawMode:
       increment_key(row, col, 1);
       break;
-    case GameMode::Puzzle:
+    case GameMode::PuzzleMode:
       increment_key(row, col, 2);
       increment_key(row - 1, col, 1);
       increment_key(row + 1, col, 1);
@@ -92,68 +152,9 @@ TrellisCallback gameButtonCallback(keyEvent evt)
     neoTrellis.pixels.show();
     tone(SPEAKER_PIN, 1000 + key * 100);
   }
-  else if (evt.bit.EDGE == SEESAW_KEYPAD_EDGE_FALLING)
+  else if (event.bit.EDGE == SEESAW_KEYPAD_EDGE_FALLING)
   {
     noTone(SPEAKER_PIN);
-  }
-
-  return NULL;
-}
-
-TrellisCallback gameModeSelectCallback(keyEvent evt)
-{
-  if (evt.bit.EDGE == SEESAW_KEYPAD_EDGE_RISING)
-  {
-    switch (evt.bit.NUM)
-    {
-    case GameMode::Draw:
-      gameMode = GameMode::Draw;
-      gameModeColors = DrawColors;
-      gameModeNumColors = NUM_DRAW_COLORS;
-      break;
-    case GameMode::Puzzle:
-      log_i("Game mode: 1");
-      gameMode = GameMode::Puzzle;
-      gameModeColors = PuzzleColors;
-      gameModeNumColors = NUM_PUZZLE_COLORS;
-      break;
-    default:
-      break;
-    }
-  }
-
-  return NULL;
-}
-
-TrellisCallback wifiSetupCallback(keyEvent evt)
-{
-  if (evt.bit.EDGE == SEESAW_KEYPAD_EDGE_RISING && evt.bit.NUM == 0)
-  {
-    log_i("Button 0 is pressed, setting up wifi services");
-    neoTrellis.pixels.setPixelColor(0, Blue);
-    wifiServices.setup(DEVICE_NAME);
-    wifiServices.createTask();
-
-    // wait to connect, toggling color while waiting
-    const unsigned long ConnectTimeoutMs = 10000;
-    unsigned long startMs = millis();
-    unsigned long lastToggleMillis = millis();
-    bool isBlue = true;
-    while (!wifiServices.isConnected() && millis() - startMs < ConnectTimeoutMs)
-    {
-      if (millis() - lastToggleMillis > 100)
-      {
-        lastToggleMillis = millis();
-        neoTrellis.pixels.setPixelColor(0, isBlue ? Green : Blue);
-        neoTrellis.pixels.show();
-        isBlue = !isBlue;
-      }
-    }
-
-    // indicate connection status
-    neoTrellis.pixels.setPixelColor(0, wifiServices.isConnected() ? Green : Red);
-    neoTrellis.pixels.show();
-    delay(2000);
   }
 
   return NULL;
@@ -164,53 +165,69 @@ void setup()
   Serial.begin(115200);
   log_i("Starting setup...");
 
+  pinMode(INT_PIN, INPUT);
+
   neoTrellis.begin();
-  neoTrellis.pixels.setBrightness(50);
+  neoTrellis.pixels.setBrightness(brightness);
 
-  // setup wifi/ota button callback
-  neoTrellis.activateKey(0, SEESAW_KEYPAD_EDGE_RISING);
-  neoTrellis.registerCallback(0, wifiSetupCallback);
-
-  // setup game mode select callback
-  neoTrellis.activateKey(GameMode::Draw, SEESAW_KEYPAD_EDGE_RISING);
-  neoTrellis.activateKey(GameMode::Puzzle, SEESAW_KEYPAD_EDGE_RISING);
-  neoTrellis.registerCallback(GameMode::Draw, gameModeSelectCallback);
-  neoTrellis.registerCallback(GameMode::Puzzle, gameModeSelectCallback);
-  neoTrellis.pixels.setPixelColor(GameMode::Draw, Red);
-  neoTrellis.pixels.setPixelColor(GameMode::Puzzle, Green);
+  // setup mode select callbacks
+  neoTrellis.activateKey(ModeSelect::Draw, SEESAW_KEYPAD_EDGE_RISING);
+  neoTrellis.activateKey(ModeSelect::Puzzle, SEESAW_KEYPAD_EDGE_RISING);
+  neoTrellis.activateKey(ModeSelect::BrightnessUp, SEESAW_KEYPAD_EDGE_RISING);
+  neoTrellis.activateKey(ModeSelect::BrightnessDn, SEESAW_KEYPAD_EDGE_RISING);
+  neoTrellis.activateKey(ModeSelect::Wifi, SEESAW_KEYPAD_EDGE_RISING);
+  neoTrellis.registerCallback(ModeSelect::Draw, modeSelectButtonCallback);
+  neoTrellis.registerCallback(ModeSelect::Puzzle, modeSelectButtonCallback);
+  neoTrellis.registerCallback(ModeSelect::BrightnessUp, modeSelectButtonCallback);
+  neoTrellis.registerCallback(ModeSelect::BrightnessDn, modeSelectButtonCallback);
+  neoTrellis.registerCallback(ModeSelect::Wifi, modeSelectButtonCallback);
+  neoTrellis.pixels.setPixelColor(ModeSelect::Draw, Red);
+  neoTrellis.pixels.setPixelColor(ModeSelect::Puzzle, Green);
+  neoTrellis.pixels.setPixelColor(ModeSelect::BrightnessUp, Yellow);
+  neoTrellis.pixels.setPixelColor(ModeSelect::BrightnessDn, Orange);
+  neoTrellis.pixels.setPixelColor(ModeSelect::Wifi, Blue);
 
   neoTrellis.pixels.show();
 
-  // wait for input to select game mode or wifi setup
-  const unsigned long ConnectPressTimeoutMs = 5000;
-  unsigned long startMs = millis();
   unsigned long lastToggleMillis = millis();
-  bool isOn = true;
-
-  while (millis() - startMs < ConnectPressTimeoutMs)
+  unsigned long toggleDelayMs = 1000;
+  bool connectionAttempted = false;
+  bool isBlue = true;
+  while (true)
   {
     neoTrellis.read();
 
-    // break when wifi is connected or game mode is selected
-    if (wifiServices.isConnected() || gameMode != GameMode::None)
+    // break once game mode is selected
+    if (gameMode != GameMode::None)
     {
       break;
     }
-    // toggle wifi button
-    else if (millis() - lastToggleMillis > 200)
+
+    // wifi led blinks with alt color status: off=connecting, green=connected, red=connection failed
+    if (millis() - lastToggleMillis > toggleDelayMs)
     {
-      lastToggleMillis = millis();
-      neoTrellis.pixels.setPixelColor(0, isOn ? Blue : Off);
+      connectionAttempted |= !connectionAttempted && wifiServices.isConnecting();
+      
+      uint32_t altColor = connectionAttempted ? Red : Blue;
+      altColor = wifiServices.isConnected() ? Green : altColor;
+      altColor = wifiServices.isConnecting() ? Off : altColor;
+
+      isBlue = !isBlue;
+      neoTrellis.pixels.setPixelColor(ModeSelect::Wifi, isBlue ? Blue : altColor);
       neoTrellis.pixels.show();
-      isOn = !isOn;
+      
+      lastToggleMillis = millis();
+      toggleDelayMs = isBlue ? 1000 : 100;
     }
     delay(20);
   }
 
   // unregister callbacks for setup
-  neoTrellis.unregisterCallback(0);
-  neoTrellis.unregisterCallback(GameMode::Draw);
-  neoTrellis.unregisterCallback(GameMode::Puzzle);
+  neoTrellis.unregisterCallback(ModeSelect::Draw);
+  neoTrellis.unregisterCallback(ModeSelect::Puzzle);
+  neoTrellis.unregisterCallback(ModeSelect::BrightnessUp);
+  neoTrellis.unregisterCallback(ModeSelect::BrightnessDn);
+  neoTrellis.unregisterCallback(ModeSelect::Wifi);
 
   // register callbacks for game mode
   for (int i = 0; i < NUM_KEYS; i++)
@@ -219,14 +236,6 @@ void setup()
     neoTrellis.activateKey(i, SEESAW_KEYPAD_EDGE_RISING);
     neoTrellis.activateKey(i, SEESAW_KEYPAD_EDGE_FALLING);
     neoTrellis.registerCallback(i, gameButtonCallback);
-  }
-
-  // default if no game mode is selected
-  if (gameMode == GameMode::None)
-  {
-    gameMode = GameMode::Draw;
-    gameModeColors = DrawColors;
-    gameModeNumColors = NUM_DRAW_COLORS;
   }
 
   // random initial state
@@ -243,6 +252,10 @@ void setup()
 
 void loop()
 {
-  neoTrellis.read();
+  if (!digitalRead(INT_PIN))
+  {
+    neoTrellis.read(false);
+  }
+  // neoTrellis.read();
   delay(20);
 }
