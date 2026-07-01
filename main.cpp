@@ -17,8 +17,8 @@
 enum ModeSelect
 {
   Wifi = 0,
-  BrightnessUp = 1,
-  BrightnessDn = 2,
+  BrightnessUp = 2,
+  BrightnessDn = 3,
   Snake = 13,
   Puzzle = 14,
   Draw = 15,
@@ -46,7 +46,7 @@ uint32_t Orange = neoTrellis.pixels.Color(0xFF, 0x7F, 0);
 uint32_t Yellow = neoTrellis.pixels.Color(0xFF, 0xFF, 0);
 // uint32_t YellowGreen = neoTrellis.pixels.Color(0x7F, 0xFF, 0);
 uint32_t Green = neoTrellis.pixels.Color(0, 0xFF, 0);
-// uint32_t GreenBlue = neoTrellis.pixels.Color(0, 0xFF, 0x7F);
+uint32_t GreenBlue = neoTrellis.pixels.Color(0, 0xFF, 0x7F);
 uint32_t Blue = neoTrellis.pixels.Color(0, 0, 0xFF);
 uint32_t Indigo = neoTrellis.pixels.Color(0x7F, 0, 0xFF);
 uint32_t Violet = neoTrellis.pixels.Color(0xFF, 0, 0xFF);
@@ -57,6 +57,7 @@ uint32_t PuzzleColors[NUM_PUZZLE_COLORS] = {Off, Blue, Green, Red};
 #define SNAKE_MOVE_INTERVAL_MS 800
 #define OBSTACLE_SPAWN_INTERVAL_MS 3000
 #define MAX_OBSTACLES 10
+#define DEAD_BLINK_INTERVAL_MS 300
 
 int snakeBody[SNAKE_MAX_LEN]; // [0] = head
 int snakeLen = 1;
@@ -64,14 +65,18 @@ int obstacles[MAX_OBSTACLES];
 int numObstacles = 0;
 int foodCell = -1; // -1 = no food currently on board
 bool snakeGameOver = false;
+int snakeDeadCell = -1;
 
 unsigned long lastSnakeMoveMillis = 0;
 unsigned long lastSnakeGrowMillis = 0;
 unsigned long lastObstacleSpawnMillis = 0;
+unsigned long lastDeadBlinkMillis = 0;
+bool deadBlinkOn = true;
 
 uint32_t SnakeHeadColor = Violet;
 uint32_t SnakeBodyColor = Indigo;
-uint32_t SnakeDeadColor = Blue;
+uint32_t SnakeDeadHeadColor = Violet;
+uint32_t SnakeDeadBodyColor = Indigo;
 uint32_t ObstacleColor = Red;
 uint32_t FoodColor = Yellow;
 
@@ -103,6 +108,11 @@ inline int indexToCol(int index)
 {
   // index % NUM_COLS
   return colLookup[index];
+}
+
+int distance(int a, int b)
+{
+  return abs(indexToRow(a) - indexToRow(b)) + abs(indexToCol(a) - indexToCol(b));
 }
 
 void increment_key(int row, int col, int inc)
@@ -254,7 +264,63 @@ int getSnakeNextCell()
     return -1; // trapped
   }
 
+  if (foodCell != -1)
+  {
+    // eat food if available in this move
+    for (int i = 0; i < numValid; i++)
+    {
+      if (legalMoves[i] == foodCell)
+      {
+        return foodCell;
+      }
+    }
+
+    // otherwise, chance to bias toward food, dropping off quickly with distance
+    int distToFood = distance(snakeBody[0], foodCell);
+    int biasChancePercent = 100 / distToFood; // 2->50%, 3->25%, 4->12%, 5->5%
+
+    // if biased, then trim the non-optimal legal moves
+    if ((int)random(100) < biasChancePercent)
+    {
+      int minDist = distance(snakeBody[0], foodCell);
+      for (int i = 0; i < numValid; i++)
+      {
+        int curDist = distance(legalMoves[i], foodCell);
+        if (curDist < minDist)
+        {
+          minDist = curDist;
+        }
+      }
+
+      int numOptimal = 0;
+      for (int i = 0; i < numValid; i++)
+      {
+        if (distance(legalMoves[i], foodCell) == minDist)
+        {
+          legalMoves[numOptimal++] = legalMoves[i];
+        }
+      }
+
+      if (numOptimal > 0)
+      {
+        numValid = numOptimal;
+      }
+      else
+      {
+        log_i("No optimal moves");
+      }
+    }
+  }
+
   return legalMoves[random(numValid)];
+}
+
+void triggerGameOver(int deadCell)
+{
+  snakeGameOver = true;
+  snakeDeadCell = deadCell;
+  deadBlinkOn = true;
+  lastDeadBlinkMillis = millis();
 }
 
 void moveSnake()
@@ -262,13 +328,29 @@ void moveSnake()
   int nextCell = getSnakeNextCell();
 
   // trapped or dead
-  if (nextCell == -1 || isObstacleCell(nextCell))
+  if (nextCell == -1)
   {
-    snakeGameOver = true;
+    triggerGameOver(snakeBody[0]);
     return;
   }
 
-  bool ateFood = isFoodCell(nextCell);
+  if (isObstacleCell(nextCell))
+  {
+    triggerGameOver(nextCell);
+    return;
+  }
+
+  if (isFoodCell(nextCell))
+  {
+    foodCell = -1;
+
+    // extend after eating
+    if (snakeLen < SNAKE_MAX_LEN)
+    {
+      snakeBody[snakeLen] = snakeBody[snakeLen - 1];
+      snakeLen++;
+    }
+  }
 
   // shift body toward head
   for (int i = snakeLen - 1; i > 0; i--)
@@ -276,15 +358,6 @@ void moveSnake()
     snakeBody[i] = snakeBody[i - 1];
   }
   snakeBody[0] = nextCell;
-
-  if (ateFood)
-  {
-    foodCell = -1; // consumed
-    if (snakeLen < SNAKE_MAX_LEN)
-    {
-      snakeLen++; // tail segment implicitly extends since snakeBody[snakeLen-1] retains old tail position
-    }
-  }
 }
 
 void shrinkSnake()
@@ -314,8 +387,14 @@ void drawSnakeGrid()
 
   for (int i = 0; i < snakeLen; i++)
   {
-    uint32_t color = snakeGameOver ? SnakeDeadColor : (i == 0 ? SnakeHeadColor : SnakeBodyColor);
+    uint32_t color = snakeGameOver ? (i == 0 ? SnakeDeadHeadColor : SnakeDeadBodyColor) : (i == 0 ? SnakeHeadColor : SnakeBodyColor);
     neoTrellis.pixels.setPixelColor(snakeBody[i], color);
+  }
+
+  // blink what killed the snake
+  if (snakeGameOver && snakeDeadCell != -1 && !deadBlinkOn)
+  {
+    neoTrellis.pixels.setPixelColor(snakeDeadCell, Off);
   }
 
   neoTrellis.pixels.show();
@@ -325,6 +404,12 @@ void snakeGameTick()
 {
   if (snakeGameOver)
   {
+    if (millis() - lastDeadBlinkMillis > DEAD_BLINK_INTERVAL_MS)
+    {
+      deadBlinkOn = !deadBlinkOn;
+      lastDeadBlinkMillis = millis();
+      drawSnakeGrid();
+    }
     return;
   }
 
