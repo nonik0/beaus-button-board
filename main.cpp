@@ -34,7 +34,7 @@ enum GameMode
 
 Adafruit_NeoTrellis neoTrellis = Adafruit_NeoTrellis();
 int buttonStates[NUM_KEYS];
-uint8_t brightness = 20;
+uint8_t brightness = 25;
 GameMode gameMode = GameMode::None;
 uint32_t *gameModeColors;
 uint32_t gameModeNumColors;
@@ -48,12 +48,12 @@ uint32_t Yellow = neoTrellis.pixels.Color(0xFF, 0xFF, 0);
 uint32_t Green = neoTrellis.pixels.Color(0, 0xFF, 0);
 uint32_t GreenBlue = neoTrellis.pixels.Color(0, 0xFF, 0x7F);
 uint32_t Blue = neoTrellis.pixels.Color(0, 0, 0xFF);
-uint32_t Indigo = neoTrellis.pixels.Color(0x7F, 0, 0xFF);
+uint32_t Indigo = neoTrellis.pixels.Color(0x8F, 0, 0xFF);
 uint32_t Violet = neoTrellis.pixels.Color(0xFF, 0, 0xFF);
 uint32_t DrawColors[NUM_DRAW_COLORS] = {Off, Red, Orange, Yellow, Green, Blue, Indigo};
 uint32_t PuzzleColors[NUM_PUZZLE_COLORS] = {Off, Blue, Green, Red};
 
-#define SNAKE_MAX_LEN 6
+#define SNAKE_MAX_LEN 13
 #define SNAKE_MOVE_INTERVAL_MS 800
 #define OBSTACLE_SPAWN_INTERVAL_MS 3000
 #define MAX_OBSTACLES 10
@@ -244,6 +244,76 @@ void removeObstacleAt(int index)
   }
 }
 
+int floodFillCount(int start, bool blocked[NUM_KEYS])
+{
+  bool visited[NUM_KEYS] = {};
+  int queue[NUM_KEYS];
+  int head = 0;
+  int tail = 0;
+
+  visited[start] = true;
+  queue[tail++] = start;
+
+  int count = 0;
+
+  while (head != tail)
+  {
+    int cell = queue[head++];
+    count++;
+
+    int neighbors[4];
+    int n = getAdjacentCells(cell, neighbors);
+
+    for (int i = 0; i < n; i++)
+    {
+      int next = neighbors[i];
+
+      if (!visited[next] && !blocked[next])
+      {
+        visited[next] = true;
+        queue[tail++] = next;
+      }
+    }
+  }
+
+  return count;
+}
+
+int scoreMove(int nextCell)
+{
+  bool blocked[NUM_KEYS] = {};
+
+  // Obstacles
+  for (int i = 0; i < numObstacles; i++)
+  {
+    blocked[obstacles[i]] = true;
+  }
+
+  blocked[nextCell] = true; // new head
+
+  int len = isFoodCell(nextCell) ? snakeLen : snakeLen - 1;
+  for (int i = 0; i < len; i++)
+  {
+    blocked[snakeBody[i]] = true;
+  }
+
+  int reachable = floodFillCount(nextCell, blocked);
+
+  int score = reachable * 100;
+
+  if (foodCell != -1)
+  {
+    score -= distance(nextCell, foodCell) * 5;
+  }
+
+  if (isFoodCell(nextCell))
+  {
+    score += 150;
+  }
+
+  return score;
+}
+
 int getSnakeNextCell()
 {
   int neighbors[4];
@@ -264,55 +334,27 @@ int getSnakeNextCell()
     return -1; // trapped
   }
 
-  if (foodCell != -1)
+  int bestScore = -100000;
+  int bestMoves[4];
+  int bestCount = 0;
+
+  for (int i = 0; i < numValid; i++)
   {
-    // eat food if available in this move
-    for (int i = 0; i < numValid; i++)
+    int score = scoreMove(legalMoves[i]);
+
+    if (score > bestScore)
     {
-      if (legalMoves[i] == foodCell)
-      {
-        return foodCell;
-      }
+      bestScore = score;
+      bestMoves[0] = legalMoves[i];
+      bestCount = 1;
     }
-
-    // otherwise, chance to bias toward food, dropping off quickly with distance
-    int distToFood = distance(snakeBody[0], foodCell);
-    int biasChancePercent = 100 / distToFood; // 2->50%, 3->25%, 4->12%, 5->5%
-
-    // if biased, then trim the non-optimal legal moves
-    if ((int)random(100) < biasChancePercent)
+    else if (score == bestScore)
     {
-      int minDist = distance(snakeBody[0], foodCell);
-      for (int i = 0; i < numValid; i++)
-      {
-        int curDist = distance(legalMoves[i], foodCell);
-        if (curDist < minDist)
-        {
-          minDist = curDist;
-        }
-      }
-
-      int numOptimal = 0;
-      for (int i = 0; i < numValid; i++)
-      {
-        if (distance(legalMoves[i], foodCell) == minDist)
-        {
-          legalMoves[numOptimal++] = legalMoves[i];
-        }
-      }
-
-      if (numOptimal > 0)
-      {
-        numValid = numOptimal;
-      }
-      else
-      {
-        log_i("No optimal moves");
-      }
+      bestMoves[bestCount++] = legalMoves[i];
     }
   }
 
-  return legalMoves[random(numValid)];
+  return bestMoves[random(bestCount)];
 }
 
 void triggerGameOver(int deadCell)
