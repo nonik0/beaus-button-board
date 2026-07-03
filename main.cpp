@@ -1,14 +1,15 @@
 #include <Arduino.h>
 #include <Adafruit_NeoTrellis.h>
 #include <SPI.h>
+
+#include "snake.h"
+#include "snakeBehavior.h"
 #include "wifi_services.h"
 
 #define SPEAKER_PIN 2
 #define INT_PIN 3
 // SDA 4, SCL 5
-#define NUM_KEYS 16
-#define NUM_ROWS 4
-#define NUM_COLS 4
+
 #define NUM_DRAW_COLORS 7
 #define NUM_PUZZLE_COLORS 4
 #define OFF 0
@@ -16,12 +17,13 @@
 // these are mapped to LED indices
 enum ModeSelect
 {
-  Wifi = 0,
+  WifiInit = 0,
   BrightnessUp = 2,
   BrightnessDn = 3,
-  Snake = 13,
-  Puzzle = 14,
-  Draw = 15,
+  Snake2Select = 12,
+  SnakeSelect = 13,
+  PuzzleSelect = 14,
+  DrawSelect = 15,
 };
 
 enum GameMode
@@ -29,12 +31,13 @@ enum GameMode
   DrawMode,
   PuzzleMode,
   SnakeMode,
+  Snake2Mode,
   None,
 };
 
 Adafruit_NeoTrellis neoTrellis = Adafruit_NeoTrellis();
 int buttonStates[NUM_KEYS];
-uint8_t brightness = 25;
+int brightness = 25;
 GameMode gameMode = GameMode::None;
 uint32_t *gameModeColors;
 uint32_t gameModeNumColors;
@@ -44,76 +47,42 @@ uint32_t Off = neoTrellis.pixels.Color(0, 0, 0);
 uint32_t Red = neoTrellis.pixels.Color(0xFF, 0, 0);
 uint32_t Orange = neoTrellis.pixels.Color(0xFF, 0x7F, 0);
 uint32_t Yellow = neoTrellis.pixels.Color(0xFF, 0xFF, 0);
-// uint32_t YellowGreen = neoTrellis.pixels.Color(0x7F, 0xFF, 0);
+uint32_t YellowGreen = neoTrellis.pixels.Color(0x7F, 0xFF, 0);
 uint32_t Green = neoTrellis.pixels.Color(0, 0xFF, 0);
 uint32_t GreenBlue = neoTrellis.pixels.Color(0, 0xFF, 0x7F);
 uint32_t Blue = neoTrellis.pixels.Color(0, 0, 0xFF);
-uint32_t Indigo = neoTrellis.pixels.Color(0x8F, 0, 0xFF);
+uint32_t Indigo = neoTrellis.pixels.Color(0x7F, 0, 0xFF);
 uint32_t Violet = neoTrellis.pixels.Color(0xFF, 0, 0xFF);
 uint32_t DrawColors[NUM_DRAW_COLORS] = {Off, Red, Orange, Yellow, Green, Blue, Indigo};
 uint32_t PuzzleColors[NUM_PUZZLE_COLORS] = {Off, Blue, Green, Red};
 
-#define SNAKE_MAX_LEN 13
-#define SNAKE_MOVE_INTERVAL_MS 800
+#define SNAKE_MOVE_INTERVAL_MS 500
 #define OBSTACLE_SPAWN_INTERVAL_MS 3000
 #define MAX_OBSTACLES 10
 #define DEAD_BLINK_INTERVAL_MS 300
+#define GAME_OVER_DELAY_MS 3000
+#define GAME_OVER_PENALTY_MS 1000
+#define GAME_OVER_MAX_DELAY_MS 15000
 
-int snakeBody[SNAKE_MAX_LEN]; // [0] = head
-int snakeLen = 1;
+Snake snake;
+bool obstaclesEnabled = false;
 int obstacles[MAX_OBSTACLES];
 int numObstacles = 0;
 int foodCell = -1; // -1 = no food currently on board
 bool snakeGameOver = false;
 int snakeDeadCell = -1;
+unsigned long snakeMoveIntervalMs = SNAKE_MOVE_INTERVAL_MS;
+unsigned long obstacleSpawnIntervalMs = OBSTACLE_SPAWN_INTERVAL_MS;
+unsigned long gameOverDelayMs = GAME_OVER_DELAY_MS;
 
 unsigned long lastSnakeMoveMillis = 0;
-unsigned long lastSnakeGrowMillis = 0;
 unsigned long lastObstacleSpawnMillis = 0;
 unsigned long lastDeadBlinkMillis = 0;
+unsigned long lastGameOverInputMillis = 0;
 bool deadBlinkOn = true;
 
-uint32_t SnakeHeadColor = Violet;
-uint32_t SnakeBodyColor = Indigo;
-uint32_t SnakeDeadHeadColor = Violet;
-uint32_t SnakeDeadBodyColor = Indigo;
 uint32_t ObstacleColor = Red;
-uint32_t FoodColor = Yellow;
-
-inline int coordToIndex(int row, int col)
-{
-  return row * NUM_COLS + col;
-}
-
-// precomputed once, indexed 0..NUM_KEYS-1
-const uint8_t rowLookup[NUM_KEYS] = {
-    0, 0, 0, 0,
-    1, 1, 1, 1,
-    2, 2, 2, 2,
-    3, 3, 3, 3};
-
-const uint8_t colLookup[NUM_KEYS] = {
-    0, 1, 2, 3,
-    0, 1, 2, 3,
-    0, 1, 2, 3,
-    0, 1, 2, 3};
-
-inline int indexToRow(int index)
-{
-  // index / NUM_COLS
-  return rowLookup[index];
-}
-
-inline int indexToCol(int index)
-{
-  // index % NUM_COLS
-  return colLookup[index];
-}
-
-int distance(int a, int b)
-{
-  return abs(indexToRow(a) - indexToRow(b)) + abs(indexToCol(a) - indexToCol(b));
-}
+uint32_t FoodColor = Blue;
 
 void increment_key(int row, int col, int inc)
 {
@@ -126,32 +95,16 @@ void increment_key(int row, int col, int inc)
   }
 }
 
-int getAdjacentCells(int fromindex, int outCells[4])
+bool isFoodCell(int cell)
 {
-  int row = indexToRow(fromindex), col = indexToCol(fromindex);
-  int dr[] = {-1, 1, 0, 0}, dc[] = {0, 0, -1, 1};
-  int n = 0;
-  for (int d = 0; d < 4; d++)
-  {
-    int r = row + dr[d], c = col + dc[d];
-    if (r >= 0 && r < NUM_ROWS && c >= 0 && c < NUM_COLS)
-    {
-      outCells[n++] = coordToIndex(r, c);
-    }
-  }
-  return n; // count of valid neighbors written into outCells
+  return foodCell != -1 && foodCell == cell;
 }
 
-bool isFoodCell(int index)
-{
-  return foodCell != -1 && foodCell == index;
-}
-
-bool isObstacleCell(int index)
+bool isObstacleCell(int cell)
 {
   for (int i = 0; i < numObstacles; i++)
   {
-    if (obstacles[i] == index)
+    if (obstacles[i] == cell)
     {
       return true;
     }
@@ -160,28 +113,9 @@ bool isObstacleCell(int index)
   return false;
 }
 
-bool isSnakeCell(int index)
+bool isSnakeCell(int cell)
 {
-  for (int i = 0; i < snakeLen; i++)
-  {
-    if (snakeBody[i] == index)
-    {
-      return true;
-    }
-  }
-
-  return false;
-}
-
-bool isAdjacentToHead(int index)
-{
-  int headRow = indexToRow(snakeBody[0]);
-  int headCol = indexToCol(snakeBody[0]);
-  int row = indexToRow(index);
-  int col = indexToCol(index);
-  int rowDist = abs(row - headRow);
-  int colDist = abs(col - headCol);
-  return (rowDist + colDist) <= 1; // includes head cell itself (dist 0) and 4 orthogonal neighbors
+  return snake.contains(cell);
 }
 
 void spawnFood()
@@ -191,222 +125,69 @@ void spawnFood()
     return;
   }
 
-  int index, attempts = 0;
+  int cell, attempts = 0;
   do
   {
-    index = random(NUM_KEYS);
+    cell = random(NUM_KEYS);
     attempts++;
-  } while ((isSnakeCell(index) || isObstacleCell(index)) && attempts < 20);
+  } while ((isSnakeCell(cell) || isObstacleCell(cell)) && attempts < 20);
 
-  if (!isSnakeCell(index) && !isObstacleCell(index))
+  if (!isSnakeCell(cell) && !isObstacleCell(cell))
   {
-    foodCell = index;
+    log_i("Food spawned at: %d", cell);
+    foodCell = cell;
   }
 }
 
-void removeFoodAt(int index)
+void removeFoodAt(int cell)
 {
-  if (foodCell == index)
+  if (foodCell == cell)
   {
     foodCell = -1;
   }
+}
+
+bool isAdjacentToHead(int cell)
+{
+  int headRow = indexToRow(snake.head());
+  int headCol = indexToCol(snake.head());
+  int row = indexToRow(cell);
+  int col = indexToCol(cell);
+  int rowDist = abs(row - headRow);
+  int colDist = abs(col - headCol);
+  return (rowDist + colDist) <= 1; // includes head cell itself (dist 0) and 4 orthogonal neighbors
 }
 
 void spawnObstacle()
 {
-  if (numObstacles >= MAX_OBSTACLES)
+  if (!obstaclesEnabled || numObstacles >= MAX_OBSTACLES)
   {
     return;
   }
 
-  int index, attempts = 0;
+  int cell, attempts = 0;
   do
   {
-    index = random(NUM_KEYS);
+    cell = random(NUM_KEYS);
     attempts++;
-  } while ((isSnakeCell(index) || isObstacleCell(index) || isFoodCell(index) || isAdjacentToHead(index)) && attempts < 20);
+  } while ((isSnakeCell(cell) || isObstacleCell(cell) || isFoodCell(cell) || isAdjacentToHead(cell)) && attempts < 20);
 
-  if (!isSnakeCell(index) && !isObstacleCell(index) && !isFoodCell(index) && !isAdjacentToHead(index))
+  if (!isSnakeCell(cell) && !isObstacleCell(cell) && !isFoodCell(cell) && !isAdjacentToHead(cell))
   {
-    obstacles[numObstacles++] = index;
+    log_i("Spawned obstacle at %d", cell);
+    obstacles[numObstacles++] = cell;
   }
 }
 
-void removeObstacleAt(int index)
+void removeObstacleAt(int cell)
 {
   for (int i = 0; i < numObstacles; i++)
   {
-    if (obstacles[i] == index)
+    if (obstacles[i] == cell)
     {
       obstacles[i] = obstacles[--numObstacles]; // swap-remove
       return;
     }
-  }
-}
-
-int floodFillCount(int start, bool blocked[NUM_KEYS])
-{
-  bool visited[NUM_KEYS] = {};
-  int queue[NUM_KEYS];
-  int head = 0;
-  int tail = 0;
-
-  visited[start] = true;
-  queue[tail++] = start;
-
-  int count = 0;
-
-  while (head != tail)
-  {
-    int cell = queue[head++];
-    count++;
-
-    int neighbors[4];
-    int n = getAdjacentCells(cell, neighbors);
-
-    for (int i = 0; i < n; i++)
-    {
-      int next = neighbors[i];
-
-      if (!visited[next] && !blocked[next])
-      {
-        visited[next] = true;
-        queue[tail++] = next;
-      }
-    }
-  }
-
-  return count;
-}
-
-int scoreMove(int nextCell)
-{
-  bool blocked[NUM_KEYS] = {};
-
-  // Obstacles
-  for (int i = 0; i < numObstacles; i++)
-  {
-    blocked[obstacles[i]] = true;
-  }
-
-  blocked[nextCell] = true; // new head
-
-  int len = isFoodCell(nextCell) ? snakeLen : snakeLen - 1;
-  for (int i = 0; i < len; i++)
-  {
-    blocked[snakeBody[i]] = true;
-  }
-
-  int reachable = floodFillCount(nextCell, blocked);
-
-  int score = reachable * 100;
-
-  if (foodCell != -1)
-  {
-    score -= distance(nextCell, foodCell) * 5;
-  }
-
-  if (isFoodCell(nextCell))
-  {
-    score += 150;
-  }
-
-  return score;
-}
-
-int getSnakeNextCell()
-{
-  int neighbors[4];
-  int n = getAdjacentCells(snakeBody[0], neighbors);
-
-  int legalMoves[4];
-  int numValid = 0;
-  for (int i = 0; i < n; i++)
-  {
-    if (!isSnakeCell(neighbors[i]))
-    {
-      legalMoves[numValid++] = neighbors[i];
-    }
-  }
-
-  if (numValid == 0)
-  {
-    return -1; // trapped
-  }
-
-  int bestScore = -100000;
-  int bestMoves[4];
-  int bestCount = 0;
-
-  for (int i = 0; i < numValid; i++)
-  {
-    int score = scoreMove(legalMoves[i]);
-
-    if (score > bestScore)
-    {
-      bestScore = score;
-      bestMoves[0] = legalMoves[i];
-      bestCount = 1;
-    }
-    else if (score == bestScore)
-    {
-      bestMoves[bestCount++] = legalMoves[i];
-    }
-  }
-
-  return bestMoves[random(bestCount)];
-}
-
-void triggerGameOver(int deadCell)
-{
-  snakeGameOver = true;
-  snakeDeadCell = deadCell;
-  deadBlinkOn = true;
-  lastDeadBlinkMillis = millis();
-}
-
-void moveSnake()
-{
-  int nextCell = getSnakeNextCell();
-
-  // trapped or dead
-  if (nextCell == -1)
-  {
-    triggerGameOver(snakeBody[0]);
-    return;
-  }
-
-  if (isObstacleCell(nextCell))
-  {
-    triggerGameOver(nextCell);
-    return;
-  }
-
-  if (isFoodCell(nextCell))
-  {
-    foodCell = -1;
-
-    // extend after eating
-    if (snakeLen < SNAKE_MAX_LEN)
-    {
-      snakeBody[snakeLen] = snakeBody[snakeLen - 1];
-      snakeLen++;
-    }
-  }
-
-  // shift body toward head
-  for (int i = snakeLen - 1; i > 0; i--)
-  {
-    snakeBody[i] = snakeBody[i - 1];
-  }
-  snakeBody[0] = nextCell;
-}
-
-void shrinkSnake()
-{
-  if (snakeLen > 1)
-  {
-    snakeLen--;
   }
 }
 
@@ -427,10 +208,18 @@ void drawSnakeGrid()
     neoTrellis.pixels.setPixelColor(obstacles[i], ObstacleColor);
   }
 
-  for (int i = 0; i < snakeLen; i++)
+  // snake gets dimmer with each segment down to ~20% brightness at tail
+  int red = 0x4F;
+  int redDelta = (1.6 * red) / snake.size();
+  int green = 0xFF;
+  int greenDelta = (0.8 * green) / snake.size();
+  for (int i = 0; i < snake.size(); i++)
   {
-    uint32_t color = snakeGameOver ? (i == 0 ? SnakeDeadHeadColor : SnakeDeadBodyColor) : (i == 0 ? SnakeHeadColor : SnakeBodyColor);
-    neoTrellis.pixels.setPixelColor(snakeBody[i], color);
+    uint32_t color = neoTrellis.pixels.Color(red, green, 0x00);
+    neoTrellis.pixels.setPixelColor(snake[i], color);
+
+    red = max(0, red - redDelta);
+    green = max(40, green - greenDelta);
   }
 
   // blink what killed the snake
@@ -440,6 +229,89 @@ void drawSnakeGrid()
   }
 
   neoTrellis.pixels.show();
+}
+
+void resetSnakeGame()
+{
+  snake.clearTail();
+  numObstacles = 0;
+  foodCell = -1;
+  snakeGameOver = false;
+  lastSnakeMoveMillis = millis();
+  lastObstacleSpawnMillis = millis();
+}
+
+void triggerGameOver(int deadCell)
+{
+  snakeGameOver = true;
+  snakeDeadCell = deadCell;
+  deadBlinkOn = true;
+  lastDeadBlinkMillis = millis();
+  lastGameOverInputMillis = millis();
+  gameOverDelayMs = GAME_OVER_DELAY_MS; 
+
+  // difficulty increase after each win
+  if (deadCell < 0)
+  {
+    obstacleSpawnIntervalMs = 0.8 * obstacleSpawnIntervalMs;
+    snakeMoveIntervalMs = 0.8 * snakeMoveIntervalMs;
+    log_i("New difficulty: %d %d", obstacleSpawnIntervalMs, snakeMoveIntervalMs);
+  }
+}
+
+void shrinkSnake()
+{
+  if (snake.size() > 1)
+  {
+    log_i("Player booped snake");
+    snake.popTail();
+  }
+  else
+  {
+    // victory on snake 1, loss on snake 2
+    log_i("Player squished snake!");
+    triggerGameOver(obstaclesEnabled ? snake.head() : -1);
+  }
+}
+
+void moveSnake()
+{
+  int nextCell = getSnakeNextCell(snake, foodCell);
+
+  if (nextCell == -1)
+  {
+    log_w("Snake trapped: %d", snake.head());
+    triggerGameOver(snake.head());
+    return;
+  }
+
+  if (isObstacleCell(nextCell))
+  {
+    log_i("Snake hit obstacle: %d->%d", snake.head(), nextCell);
+    triggerGameOver(nextCell);
+    return;
+  }
+
+  if (isFoodCell(nextCell))
+  {
+    log_i("Snake ate food: %d->%d", snake.head(), nextCell);
+    removeFoodAt(nextCell);
+    snake.grow(nextCell);
+  }
+  else
+  {
+    log_i("Snake moved: %d->%d", snake.head(), nextCell);
+    snake.move(nextCell);
+  }
+
+  // check game ending condition
+  if (snake.size() == SNAKE_MAX_LEN)
+  {
+    // loss on snake 1, victory on snake 2
+    log_i("Snake is big boi!");
+    triggerGameOver(obstaclesEnabled ? -1 : snake.head());
+    return;
+  }
 }
 
 void snakeGameTick()
@@ -455,30 +327,21 @@ void snakeGameTick()
     return;
   }
 
-  if (millis() - lastObstacleSpawnMillis > OBSTACLE_SPAWN_INTERVAL_MS)
+  spawnFood();
+
+  if (millis() - lastObstacleSpawnMillis > obstacleSpawnIntervalMs)
   {
     spawnObstacle();
     lastObstacleSpawnMillis = millis();
   }
 
-  spawnFood();
-  if (millis() - lastSnakeMoveMillis > SNAKE_MOVE_INTERVAL_MS)
+  if (millis() - lastSnakeMoveMillis > snakeMoveIntervalMs)
   {
     moveSnake();
     lastSnakeMoveMillis = millis();
   }
-  drawSnakeGrid();
-}
 
-void resetSnakeGame()
-{
-  snakeLen = 1;
-  // snake head stays where it's at
-  numObstacles = 0;
-  foodCell = -1;
-  snakeGameOver = false;
-  lastSnakeMoveMillis = millis();
-  lastObstacleSpawnMillis = millis();
+  drawSnakeGrid();
 }
 
 void initRandomColorState()
@@ -501,24 +364,33 @@ TrellisCallback modeSelectButtonCallback(keyEvent event)
 
     switch (event.bit.NUM)
     {
-    case ModeSelect::Draw:
+    case ModeSelect::DrawSelect:
       gameMode = GameMode::DrawMode;
       gameModeColors = DrawColors;
       gameModeNumColors = NUM_DRAW_COLORS;
       initRandomColorState();
       log_i("Game Mode: draw");
       break;
-    case ModeSelect::Puzzle:
+    case ModeSelect::PuzzleSelect:
       gameMode = GameMode::PuzzleMode;
       gameModeColors = PuzzleColors;
       gameModeNumColors = NUM_PUZZLE_COLORS;
       initRandomColorState();
       log_i("Game Mode: puzzle");
       break;
-    case ModeSelect::Snake:
+    case ModeSelect::SnakeSelect:
       gameMode = GameMode::SnakeMode;
-      snakeBody[0] = random(NUM_KEYS);
+      snake.clear();
+      snake.pushHead(random(NUM_KEYS));
+      obstaclesEnabled = false;
       log_i("Game Mode: snake");
+      break;
+    case ModeSelect::Snake2Select:
+      gameMode = GameMode::Snake2Mode;
+      snake.clear();
+      snake.pushHead(random(NUM_KEYS));
+      obstaclesEnabled = true;
+      log_i("Game Mode: snake 2");
       break;
     case ModeSelect::BrightnessUp:
     case ModeSelect::BrightnessDn:
@@ -527,19 +399,20 @@ TrellisCallback modeSelectButtonCallback(keyEvent event)
       neoTrellis.pixels.setBrightness(brightness);
 
       // TODO: factor into helper shared with setup
-      neoTrellis.pixels.setPixelColor(ModeSelect::Draw, Red);
-      neoTrellis.pixels.setPixelColor(ModeSelect::Puzzle, Green);
-      neoTrellis.pixels.setPixelColor(ModeSelect::Snake, Violet);
+      neoTrellis.pixels.setPixelColor(ModeSelect::DrawSelect, Red);
+      neoTrellis.pixels.setPixelColor(ModeSelect::PuzzleSelect, Violet);
+      neoTrellis.pixels.setPixelColor(ModeSelect::SnakeSelect, YellowGreen);
+      neoTrellis.pixels.setPixelColor(ModeSelect::Snake2Select, Green);
       neoTrellis.pixels.setPixelColor(ModeSelect::BrightnessUp, Yellow);
       neoTrellis.pixels.setPixelColor(ModeSelect::BrightnessDn, Orange);
-      if (neoTrellis.pixels.getPixelColor(ModeSelect::Wifi) != Off)
+      if (neoTrellis.pixels.getPixelColor(ModeSelect::WifiInit) != Off)
       {
-        neoTrellis.pixels.setPixelColor(ModeSelect::Wifi, Blue);
+        neoTrellis.pixels.setPixelColor(ModeSelect::WifiInit, Blue);
       }
       neoTrellis.pixels.show();
       log_i("Brightness: %d", brightness);
       break;
-    case ModeSelect::Wifi:
+    case ModeSelect::WifiInit:
       wifiServices.setup(DEVICE_NAME);
       break;
     }
@@ -572,17 +445,29 @@ TrellisCallback gameButtonCallback(keyEvent event)
       tone(SPEAKER_PIN, 1000 + key * 100);
       break;
     case GameMode::SnakeMode:
+    case GameMode::Snake2Mode:
       if (snakeGameOver)
       {
         if (isSnakeCell(key))
         {
-          resetSnakeGame();
-          tone(SPEAKER_PIN, 1500);
+          if (millis() - lastGameOverInputMillis > gameOverDelayMs)
+          {
+            resetSnakeGame();
+            tone(SPEAKER_PIN, 1500);
+          }
+          else
+          {
+            unsigned long nextDelay = gameOverDelayMs + GAME_OVER_PENALTY_MS;
+            gameOverDelayMs = (nextDelay < GAME_OVER_MAX_DELAY_MS) ? nextDelay : GAME_OVER_MAX_DELAY_MS; // reset and increase delay each preemptive button press
+            lastGameOverInputMillis = millis();
+            log_i("Not resetting, need to wait %ds now", (int)(gameOverDelayMs / 1000.0));
+          }
         }
         else
         {
           tone(SPEAKER_PIN, 400);
         }
+        
       }
       else if (isFoodCell(key))
       {
@@ -599,6 +484,7 @@ TrellisCallback gameButtonCallback(keyEvent event)
         shrinkSnake();
         tone(SPEAKER_PIN, 400);
       }
+
       drawSnakeGrid();
       break;
     default:
@@ -626,24 +512,27 @@ void setup()
   neoTrellis.pixels.setBrightness(brightness);
 
   // setup mode select callbacks
-  neoTrellis.activateKey(ModeSelect::Draw, SEESAW_KEYPAD_EDGE_RISING);
-  neoTrellis.activateKey(ModeSelect::Puzzle, SEESAW_KEYPAD_EDGE_RISING);
-  neoTrellis.activateKey(ModeSelect::Snake, SEESAW_KEYPAD_EDGE_RISING);
+  neoTrellis.activateKey(ModeSelect::DrawSelect, SEESAW_KEYPAD_EDGE_RISING);
+  neoTrellis.activateKey(ModeSelect::PuzzleSelect, SEESAW_KEYPAD_EDGE_RISING);
+  neoTrellis.activateKey(ModeSelect::SnakeSelect, SEESAW_KEYPAD_EDGE_RISING);
+  neoTrellis.activateKey(ModeSelect::Snake2Select, SEESAW_KEYPAD_EDGE_RISING);
   neoTrellis.activateKey(ModeSelect::BrightnessUp, SEESAW_KEYPAD_EDGE_RISING);
   neoTrellis.activateKey(ModeSelect::BrightnessDn, SEESAW_KEYPAD_EDGE_RISING);
-  neoTrellis.activateKey(ModeSelect::Wifi, SEESAW_KEYPAD_EDGE_RISING);
-  neoTrellis.registerCallback(ModeSelect::Draw, modeSelectButtonCallback);
-  neoTrellis.registerCallback(ModeSelect::Puzzle, modeSelectButtonCallback);
-  neoTrellis.registerCallback(ModeSelect::Snake, modeSelectButtonCallback);
+  neoTrellis.activateKey(ModeSelect::WifiInit, SEESAW_KEYPAD_EDGE_RISING);
+  neoTrellis.registerCallback(ModeSelect::DrawSelect, modeSelectButtonCallback);
+  neoTrellis.registerCallback(ModeSelect::PuzzleSelect, modeSelectButtonCallback);
+  neoTrellis.registerCallback(ModeSelect::SnakeSelect, modeSelectButtonCallback);
+  neoTrellis.registerCallback(ModeSelect::Snake2Select, modeSelectButtonCallback);
   neoTrellis.registerCallback(ModeSelect::BrightnessUp, modeSelectButtonCallback);
   neoTrellis.registerCallback(ModeSelect::BrightnessDn, modeSelectButtonCallback);
-  neoTrellis.registerCallback(ModeSelect::Wifi, modeSelectButtonCallback);
-  neoTrellis.pixels.setPixelColor(ModeSelect::Draw, Red);
-  neoTrellis.pixels.setPixelColor(ModeSelect::Puzzle, Green);
-  neoTrellis.pixels.setPixelColor(ModeSelect::Snake, Violet);
+  neoTrellis.registerCallback(ModeSelect::WifiInit, modeSelectButtonCallback);
+  neoTrellis.pixels.setPixelColor(ModeSelect::DrawSelect, Red);
+  neoTrellis.pixels.setPixelColor(ModeSelect::PuzzleSelect, Violet);
+  neoTrellis.pixels.setPixelColor(ModeSelect::SnakeSelect, YellowGreen);
+  neoTrellis.pixels.setPixelColor(ModeSelect::Snake2Select, Green);
   neoTrellis.pixels.setPixelColor(ModeSelect::BrightnessUp, Yellow);
   neoTrellis.pixels.setPixelColor(ModeSelect::BrightnessDn, Orange);
-  neoTrellis.pixels.setPixelColor(ModeSelect::Wifi, Blue);
+  neoTrellis.pixels.setPixelColor(ModeSelect::WifiInit, Blue);
 
   neoTrellis.pixels.show();
 
@@ -671,7 +560,7 @@ void setup()
       altColor = wifiServices.isConnecting() ? Off : altColor;
 
       isBlue = !isBlue;
-      neoTrellis.pixels.setPixelColor(ModeSelect::Wifi, isBlue ? Blue : altColor);
+      neoTrellis.pixels.setPixelColor(ModeSelect::WifiInit, isBlue ? Blue : altColor);
       neoTrellis.pixels.show();
 
       lastToggleMillis = millis();
@@ -681,12 +570,13 @@ void setup()
   }
 
   // unregister callbacks for setup
-  neoTrellis.unregisterCallback(ModeSelect::Draw);
-  neoTrellis.unregisterCallback(ModeSelect::Puzzle);
-  neoTrellis.unregisterCallback(ModeSelect::Snake);
+  neoTrellis.unregisterCallback(ModeSelect::DrawSelect);
+  neoTrellis.unregisterCallback(ModeSelect::PuzzleSelect);
+  neoTrellis.unregisterCallback(ModeSelect::SnakeSelect);
+  neoTrellis.unregisterCallback(ModeSelect::Snake2Select);
   neoTrellis.unregisterCallback(ModeSelect::BrightnessUp);
   neoTrellis.unregisterCallback(ModeSelect::BrightnessDn);
-  neoTrellis.unregisterCallback(ModeSelect::Wifi);
+  neoTrellis.unregisterCallback(ModeSelect::WifiInit);
 
   // register callbacks for game mode
   for (int i = 0; i < NUM_KEYS; i++)
@@ -707,7 +597,7 @@ void loop()
     neoTrellis.read(false);
   }
 
-  if (gameMode == GameMode::SnakeMode)
+  if (gameMode == SnakeMode || gameMode == Snake2Mode)
   {
     snakeGameTick();
   }
